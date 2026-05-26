@@ -4,10 +4,10 @@
 
 import { sha256 } from '@noble/hashes/sha2'
 import { bytesToHex } from '@noble/hashes/utils'
+import { TRUSTED_CLIENT_TOKEN } from './constants'
 import { SkewAdjustmentError } from './exceptions'
 
 // --- Constants ---
-export const TRUSTED_CLIENT_TOKEN = '6A5AA1D4EAFF4E9FB37E23D68491D6F4'
 export const WIN_EPOCH = 11644473600 // Seconds between Unix epoch (1970-01-01) and Windows file time epoch (1601-01-01)
 export const S_TO_NS = 1e9 // Seconds to nanoseconds conversion factor
 
@@ -18,8 +18,8 @@ export const S_TO_NS = 1e9 // Seconds to nanoseconds conversion factor
  * (e.g., from `fetch` or `axios`). It assumes the error object might have a `headers` property.
  */
 export interface HttpClientResponseError extends Error {
-  headers?: Record<string, string> // Headers could be a simple object mapping string to string
-  // Potentially other properties like status, statusText, etc., depending on the HTTP client.
+  headers: Record<string, string> | undefined
+  status: number | undefined
 }
 
 /**
@@ -92,7 +92,9 @@ export class DRM {
       throw new SkewAdjustmentError('No server date in headers.', { cause: e })
     }
 
-    const serverDate: string | undefined = e.headers['Date']
+    const serverDate = Object.entries(e.headers).find(
+      ([key]) => key.toLowerCase() === 'date',
+    )?.[1]
     if (typeof serverDate !== 'string') {
       throw new SkewAdjustmentError('No server date in headers.', { cause: e })
     }
@@ -142,5 +144,23 @@ export class DRM {
     // Compute the SHA256 hash using @noble/hashes and return the uppercased hex digest
     const hash = sha256(new TextEncoder().encode(strToHash))
     return bytesToHex(hash).toUpperCase()
+  }
+
+  static generateMuid(): string {
+    const bytes = crypto.getRandomValues(new Uint8Array(16))
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0'))
+      .join('')
+      .toUpperCase()
+  }
+
+  static headersWithMuid(headers: Record<string, string>): Record<string, string> {
+    if (Object.keys(headers).some((key) => key.toLowerCase() === 'cookie')) {
+      throw new Error('Cookie header already set.')
+    }
+
+    return {
+      ...headers,
+      Cookie: `muid=${DRM.generateMuid()};`,
+    }
   }
 }

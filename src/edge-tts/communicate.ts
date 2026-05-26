@@ -6,12 +6,14 @@
 import { WebSocket } from 'ws'
 import {
   DEFAULT_VOICE,
+  MP3_BITRATE_BPS,
   SEC_MS_GEC_VERSION,
+  TICKS_PER_SECOND,
   WSS_HEADERS,
   WSS_URL,
 } from './constants'
 import { TTSConfig } from './data_classes'
-import { DRM } from './drm'
+import { DRM, type HttpClientResponseError } from './drm'
 import {
   NoAudioReceived,
   UnexpectedResponse,
@@ -289,6 +291,52 @@ type Connect = (
   ...args: ConstructorParameters<typeof WebSocket>
 ) => Promise<WebSocket | globalThis.WebSocket>
 
+function canUseBrowserWebSocket(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    typeof document !== 'undefined' &&
+    typeof globalThis.WebSocket === 'function'
+  )
+}
+
+class WebSocketHandshakeError
+  extends Error
+  implements HttpClientResponseError
+{
+  headers: Record<string, string>
+  status: number | undefined
+
+  constructor(status: number | undefined, headers: Record<string, string>) {
+    super(
+      typeof status === 'number'
+        ? `WebSocket handshake failed: ${status}`
+        : 'WebSocket handshake failed',
+    )
+    this.name = 'WebSocketHandshakeError'
+    this.status = status
+    this.headers = headers
+  }
+}
+
+function normalizeHeaders(
+  headers: Record<string, string | string[] | undefined>,
+): Record<string, string> {
+  const normalized: Record<string, string> = {}
+
+  for (const [key, value] of Object.entries(headers)) {
+    if (typeof value === 'string') {
+      normalized[key] = value
+      continue
+    }
+
+    if (Array.isArray(value)) {
+      normalized[key] = value.join(', ')
+    }
+  }
+
+  return normalized
+}
+
 export class Communicate {
   private tts_config: TTSConfig
   private texts: Generator<Uint8Array, void, unknown>
@@ -328,15 +376,26 @@ export class Communicate {
       offset_compensation: 0,
       last_duration_offset: 0,
       stream_was_called: false,
+      chunk_audio_bytes: 0,
+      cumulative_audio_bytes: 0,
     }
     this.connect = async (...args) => {
-      if (globalThis.WebSocket) {
+      if (canUseBrowserWebSocket()) {
         return new globalThis.WebSocket(args[0], args[1])
       }
       const WebSocket = (await import('ws')).default
       return new WebSocket(...args)
     }
     this.connect = connect || this.connect
+  }
+
+  private compensateOffset(): void {
+    this.state.cumulative_audio_bytes += this.state.chunk_audio_bytes
+    this.state.offset_compensation = Math.floor(
+      (this.state.cumulative_audio_bytes * 8 * TICKS_PER_SECOND) /
+        MP3_BITRATE_BPS,
+    )
+    this.state.chunk_audio_bytes = 0
   }
 
   private parseMetadata(data: string): TTSChunk {
@@ -368,10 +427,33 @@ export class Communicate {
     url.searchParams.append('ConnectionId', connectId())
 
     const websocket = await this.connect(url.toString(), undefined, {
-      headers: WSS_HEADERS,
+      headers: DRM.headersWithMuid(WSS_HEADERS),
     })
 
     websocket.binaryType = 'arraybuffer'
+    let handshakeError: WebSocketHandshakeError | null = null
+
+    const websocketWithEvents = websocket as typeof websocket & {
+      once?: (
+        event: string,
+        listener: (...args: unknown[]) => void,
+      ) => void
+    }
+
+    websocketWithEvents.once?.(
+      'unexpected-response',
+      (_request: unknown, response: unknown) => {
+        const handshakeResponse = response as {
+          statusCode?: number
+          headers?: Record<string, string | string[] | undefined>
+        }
+
+        handshakeError = new WebSocketHandshakeError(
+          handshakeResponse.statusCode,
+          normalizeHeaders(handshakeResponse.headers ?? {}),
+        )
+      },
+    )
 
     let audioWasReceived = false
 
@@ -388,21 +470,6 @@ export class Communicate {
       })
     }
 
-    websocket.onmessage = (e: MessageEvent) => {
-      messageQueue.push({ type: 'message', data: e.data })
-      waiter?.()
-    }
-    websocket.onerror = (e: Event) => {
-      messageQueue.push({ type: 'error', message: (e as ErrorEvent).message })
-      waiter?.()
-    }
-    websocket.onclose = (e: CloseEvent | number, reason?: string) => {
-      const code = e instanceof Event ? e.code : e
-      const _reason = e instanceof Event ? e.reason : reason || ''
-      messageQueue.push({ type: 'close', code: code, reason: _reason })
-      waiter?.()
-    }
-
     try {
       await new Promise<void>((resolve, reject) => {
         if (websocket.readyState === websocket.OPEN) {
@@ -410,9 +477,44 @@ export class Communicate {
           return
         }
         websocket.onopen = () => resolve()
-        websocket.onerror = (e: Event) =>
+        websocket.onerror = (e: Event) => {
+          if (handshakeError) {
+            reject(handshakeError)
+            return
+          }
+
           reject(new WebSocketError((e as ErrorEvent).message))
+        }
+        websocket.onclose = (e: CloseEvent | number, reason?: string) => {
+          if (handshakeError) {
+            reject(handshakeError)
+            return
+          }
+
+          const code = e instanceof Event ? e.code : e
+          const closeReason = e instanceof Event ? e.reason : reason || ''
+          reject(
+            new WebSocketError(
+              `WebSocket closed before opening: ${code} ${closeReason}`,
+            ),
+          )
+        }
       })
+
+      websocket.onmessage = (e: MessageEvent) => {
+        messageQueue.push({ type: 'message', data: e.data })
+        waiter?.()
+      }
+      websocket.onerror = (e: Event) => {
+        messageQueue.push({ type: 'error', message: (e as ErrorEvent).message })
+        waiter?.()
+      }
+      websocket.onclose = (e: CloseEvent | number, reason?: string) => {
+        const code = e instanceof Event ? e.code : e
+        const closeReason = e instanceof Event ? e.reason : reason || ''
+        messageQueue.push({ type: 'close', code, reason: closeReason })
+        waiter?.()
+      }
 
       // Send speech config
       const wordBoundary = this.tts_config.boundary === 'WordBoundary'
@@ -465,9 +567,10 @@ export class Communicate {
               const parsed = this.parseMetadata(textDecoder.decode(body))
               yield parsed
             } else if (path === 'turn.end') {
-              this.state.offset_compensation =
-                this.state.last_duration_offset + 8_750_000
+              this.compensateOffset()
               break
+            } else if (path !== 'response' && path !== 'turn.start') {
+              throw new UnknownResponse('Unknown path received')
             }
           } else if (event.data instanceof ArrayBuffer) {
             // FIX: This block is entirely rewritten for correct binary message parsing.
@@ -496,6 +599,7 @@ export class Communicate {
             ) {
               if (body.length > 0) {
                 audioWasReceived = true
+                this.state.chunk_audio_bytes += body.length
                 yield { type: 'audio', data: body }
               }
             }
@@ -530,8 +634,26 @@ export class Communicate {
 
     for (const textChunk of this.texts) {
       this.state.partial_text = textChunk
-      for await (const message of this._stream()) {
-        yield message
+      this.state.chunk_audio_bytes = 0
+
+      try {
+        for await (const message of this._stream()) {
+          yield message
+        }
+      } catch (error) {
+        if (
+          !(error instanceof WebSocketHandshakeError) ||
+          error.status !== 403
+        ) {
+          throw error
+        }
+
+        DRM.handleClientResponseError(error)
+        this.state.chunk_audio_bytes = 0
+
+        for await (const message of this._stream()) {
+          yield message
+        }
       }
     }
   }

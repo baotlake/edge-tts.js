@@ -76,8 +76,8 @@ export type VoicePersonality =
  * VoiceTag data.
  */
 export interface VoiceTag {
-  ContentCategories: ContentCategory[]
-  VoicePersonalities: VoicePersonality[]
+  ContentCategories: string[]
+  VoicePersonalities: string[]
 }
 
 /**
@@ -88,9 +88,9 @@ export interface Voice {
   ShortName: string
   Gender: 'Female' | 'Male'
   Locale: string
-  SuggestedCodec: 'audio-24khz-48kbitrate-mono-mp3'
+  SuggestedCodec: string
   FriendlyName: string
-  Status: 'GA'
+  Status: 'Deprecated' | 'GA' | 'Preview'
   VoiceTag: VoiceTag
 }
 
@@ -124,6 +124,8 @@ export interface CommunicateState {
   offset_compensation: number
   last_duration_offset: number
   stream_was_called: boolean
+  chunk_audio_bytes: number
+  cumulative_audio_bytes: number
 }
 
 // #endregion

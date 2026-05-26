@@ -12,6 +12,7 @@ import { SubMaker } from './submaker'
 import { listVoices } from './voices'
 import { DEFAULT_VOICE } from './constants'
 import { UtilArgs } from './data_classes'
+import { __version__ } from './version'
 import { Voice } from './typing'
 
 async function printVoices(proxy?: string): Promise<void> {
@@ -125,6 +126,7 @@ export async function main(): Promise<void> {
     )
     .option('--write-subtitles <file>', 'send subtitle output to provided file')
     .option('--proxy <proxy>', 'use a proxy for TTS and voice list.')
+    .version(`edge-tts ${__version__}`, '--version', 'output the version number')
 
   // Enforce mutual exclusivity for text, file, and list-voices
   program.on('option:text', () => {

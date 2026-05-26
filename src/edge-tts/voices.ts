@@ -7,9 +7,9 @@ import {
   SEC_MS_GEC_VERSION,
   VOICE_HEADERS,
   VOICE_LIST,
-} from "./constants";
-import { DRM } from "./drm";
-import { Voice, VoicesManagerFind, VoicesManagerVoice } from "./typing";
+} from './constants'
+import { DRM, type HttpClientResponseError } from './drm'
+import { Voice, VoicesManagerFind, VoicesManagerVoice } from './typing'
 
 // --- Private Helper Function ---
 
@@ -17,13 +17,15 @@ import { Voice, VoicesManagerFind, VoicesManagerVoice } from "./typing";
  * A custom error class to handle HTTP responses that are not OK.
  * This helps in differentiating fetch errors from other exceptions.
  */
-class HttpResponseError extends Error {
-  public response: Response;
+class HttpResponseError extends Error implements HttpClientResponseError {
+  public status: number
+  public headers: Record<string, string>
 
   constructor(response: Response) {
-    super(`HTTP Error: ${response.status} ${response.statusText}`);
-    this.name = "HttpResponseError";
-    this.response = response;
+    super(`HTTP Error: ${response.status} ${response.statusText}`)
+    this.name = 'HttpResponseError'
+    this.status = response.status
+    this.headers = Object.fromEntries(response.headers.entries())
   }
 }
 
@@ -32,33 +34,29 @@ class HttpResponseError extends Error {
  * @private
  */
 async function _listVoices(proxy?: string): Promise<Voice[]> {
-  const url = new URL(VOICE_LIST);
-  url.searchParams.append("Sec-MS-GEC", DRM.generateSecMsGec());
-  url.searchParams.append("Sec-MS-GEC-Version", SEC_MS_GEC_VERSION);
+  const url = new URL(VOICE_LIST)
+  url.searchParams.append('Sec-MS-GEC', DRM.generateSecMsGec())
+  url.searchParams.append('Sec-MS-GEC-Version', SEC_MS_GEC_VERSION)
 
-  // Per instructions, prepend the proxy URL to the target URL.
-  const finalUrl = proxy ? proxy + url.toString() : url.toString();
+  const finalUrl = proxy ? proxy + url.toString() : url.toString()
 
   const response = await fetch(finalUrl, {
-    headers: VOICE_HEADERS,
-  });
+    headers: DRM.headersWithMuid(VOICE_HEADERS),
+  })
 
   if (!response.ok) {
-    throw new HttpResponseError(response);
+    throw new HttpResponseError(response)
   }
 
-  const data = (await response.json()) as Voice[];
+  const data = (await response.json()) as Array<Partial<Voice>>
 
-  // Clean up whitespace from categories and personalities.
-  return data.map((voice) => {
-    voice.VoiceTag.ContentCategories = voice.VoiceTag.ContentCategories.map(
-      (category) => category.trim() as typeof category
-    );
-    voice.VoiceTag.VoicePersonalities = voice.VoiceTag.VoicePersonalities.map(
-      (personality) => personality.trim() as typeof personality
-    );
-    return voice;
-  });
+  return data.map((voice) => ({
+    ...voice,
+    VoiceTag: {
+      ContentCategories: voice.VoiceTag?.ContentCategories ?? [],
+      VoicePersonalities: voice.VoiceTag?.VoicePersonalities ?? [],
+    },
+  })) as Voice[]
 }
 
 // --- Public API ---
@@ -71,16 +69,13 @@ async function _listVoices(proxy?: string): Promise<Voice[]> {
  */
 export async function listVoices(proxy?: string): Promise<Voice[]> {
   try {
-    return await _listVoices(proxy);
+    return await _listVoices(proxy)
   } catch (error) {
-    if (error instanceof HttpResponseError && error.response.status === 403) {
-      // If we get a 403, it might be due to an expired token.
-      // Handle the error (e.g., refresh token) and retry the request once.
-      DRM.handleClientResponseError(error);
-      return await _listVoices(proxy);
+    if (error instanceof HttpResponseError && error.status === 403) {
+      DRM.handleClientResponseError(error)
+      return await _listVoices(proxy)
     }
-    // For any other error, re-throw it.
-    throw error;
+    throw error
   }
 }
 
@@ -88,8 +83,8 @@ export async function listVoices(proxy?: string): Promise<Voice[]> {
  * A class to easily find voices based on their attributes.
  */
 export class VoicesManager {
-  public voices: VoicesManagerVoice[] = [];
-  private calledCreate: boolean = false;
+  public voices: VoicesManagerVoice[] = []
+  private calledCreate: boolean = false
 
   // A private constructor ensures that instances are only created via the async `create` method.
   private constructor() {}
@@ -101,19 +96,18 @@ export class VoicesManager {
    * @returns A promise that resolves to a fully initialized VoicesManager instance.
    */
   public static async create(
-    customVoices?: Voice[]
+    customVoices?: Voice[],
   ): Promise<VoicesManager> {
-    const manager = new VoicesManager();
-    const voices = customVoices ?? (await listVoices());
+    const manager = new VoicesManager()
+    const voices = customVoices ?? (await listVoices())
 
-    // Augment voice data with a top-level 'Language' property for easier filtering.
     manager.voices = voices.map((voice) => ({
       ...voice,
-      Language: voice.Locale.split("-")[0] as string,
-    }));
+      Language: voice.Locale.split('-')[0] as string,
+    }))
 
-    manager.calledCreate = true;
-    return manager;
+    manager.calledCreate = true
+    return manager
   }
 
   /**
@@ -125,21 +119,19 @@ export class VoicesManager {
   public find(filters: VoicesManagerFind): VoicesManagerVoice[] {
     if (!this.calledCreate) {
       throw new Error(
-        "VoicesManager.find() was called before VoicesManager.create() completed."
-      );
+        'VoicesManager.find() was called before VoicesManager.create() completed.',
+      )
     }
 
-    const filterEntries = Object.entries(filters);
+    const filterEntries = Object.entries(filters)
     if (filterEntries.length === 0) {
-      return this.voices; // Return all voices if no filters are provided.
+      return this.voices
     }
 
     return this.voices.filter((voice) => {
-      // The voice is a match if it satisfies every provided filter criterion.
       return filterEntries.every(([key, value]) => {
-        // Ensure we are comparing against properties that exist on the voice object.
-        return voice[key as keyof VoicesManagerVoice] === value;
-      });
-    });
+        return voice[key as keyof VoicesManagerVoice] === value
+      })
+    })
   }
 }
