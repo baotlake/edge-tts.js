@@ -1,5 +1,11 @@
 # edge-tts.js
 
+## 2.0.4
+
+### Patch Changes
+
+- 745b6d7: sync upstream edge-tts updates
+
 ## 2.0.3
 
 ### Patch Changes
